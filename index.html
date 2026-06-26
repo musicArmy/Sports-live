@@ -269,19 +269,20 @@
     </div>
 
     <script>
-        let hls;
-        const video = document.getElementById('player');
-        const videoContainer = document.getElementById('videoContainer');
-        const statusBox = document.getElementById('statusBox');
-        const qualitySelect = document.getElementById('qualitySelect');
-
-        // ⭐ STREAM LINK
-        const STREAM_URL = "https://lchd-314.zenostreams-cdn-001.com/fox501.m3u8";
-
-        function updateStatus(message, type = 'info') {
-            statusBox.textContent = message;
-            statusBox.className = 'status-box ' + type;
-        }
+        <!-- Video Player Section -->
+<div class="player-container">
+    <div style="padding:56.25% 0 0 0;position:relative;">
+        <iframe
+            id="contentFrame"
+            frameborder="0"
+            allow="encrypted-media"
+            allowfullscreen="true"
+            scrolling="no"
+            src="https://matcheslinkz.pages.dev/sliv3"
+            style="position:absolute;top:0;left:0;width:100%;height:100%;">
+        </iframe>
+    </div>
+</div>
 
         function playStream() {
             const url = STREAM_URL;
