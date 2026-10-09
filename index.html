@@ -183,6 +183,7 @@
             font-size: 13px;
             flex: 1;
             min-width: 150px;
+            word-break: break-word;
         }
 
         .status-box.playing {
@@ -195,6 +196,12 @@
             background: rgba(255, 0, 0, 0.1);
             border-left-color: #ff0000;
             color: #ff0000;
+        }
+
+        .status-box.info {
+            background: rgba(255, 165, 0, 0.1);
+            border-left-color: #ffa500;
+            color: #ffa500;
         }
 
         .info-panel {
@@ -210,6 +217,18 @@
 
         .info-panel strong {
             color: #0096ff;
+        }
+
+        .debug-info {
+            background: rgba(0, 150, 255, 0.05);
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.6);
+            font-family: monospace;
+            max-height: 100px;
+            overflow-y: auto;
         }
 
         @media (max-width: 768px) {
@@ -250,7 +269,7 @@
                 <select id="qualitySelect" onchange="changeQuality()">
                     <option value="">📺 Select Quality</option>
                 </select>
-                <div class="status-box" id="statusBox">Ready</div>
+                <div class="status-box" id="statusBox">Detecting stream...</div>
             </div>
 
             <div class="control-row">
@@ -263,6 +282,7 @@
                 • Click PLAY button to play stream<br>
                 • Select quality from dropdown (if available)<br>
                 • Use FULLSCREEN button for full screen mode
+                <div class="debug-info" id="debugInfo" style="display:none;"></div>
             </div>
         </div>
     </div>
@@ -274,14 +294,24 @@
         const qualitySelect = document.getElementById('qualitySelect');
         const statusBox = document.getElementById('statusBox');
         const videoContainer = document.getElementById('videoContainer');
+        const debugInfo = document.getElementById('debugInfo');
 
         let hls = null;
         let dashPlayer = null;
         let currentStreamConfig = null;
+        let detectedFormat = null;
+
+        function log(message) {
+            console.log(message);
+            const timestamp = new Date().toLocaleTimeString();
+            debugInfo.innerHTML += `[${timestamp}] ${message}<br>`;
+            debugInfo.parentElement.style.display = 'block';
+        }
 
         function updateStatus(message, type = '') {
             statusBox.textContent = message;
             statusBox.className = 'status-box' + (type ? ' ' + type : '');
+            log(message);
         }
 
         function parseStreamConfig(rawUrl) {
@@ -298,14 +328,39 @@
             };
         }
 
+        function detectStreamFormat(url) {
+            const lowerUrl = url.toLowerCase();
+            
+            if (lowerUrl.includes('.mpd')) {
+                return 'dash';
+            } else if (lowerUrl.includes('.m3u8')) {
+                return 'hls';
+            } else if (lowerUrl.includes('rtmp')) {
+                return 'rtmp';
+            }
+            return 'unknown';
+        }
+
+        function checkBrowserSupport() {
+            const support = {
+                dashjs: typeof window.dashjs !== 'undefined',
+                hlsjs: typeof window.Hls !== 'undefined',
+                nativeHls: video.canPlayType('application/vnd.apple.mpegurl') === 'maybe' || video.canPlayType('application/vnd.apple.mpegurl') === 'probably',
+                clearkey: 'MediaKeySystemAccess' in window
+            };
+            
+            log(`Browser Support: DASH.js=${support.dashjs}, HLS.js=${support.hlsjs}, Native HLS=${support.nativeHls}, ClearKey=${support.clearkey}`);
+            return support;
+        }
+
         function stopCurrentPlayback() {
             if (hls) {
-                try { hls.destroy(); } catch (e) { console.error('HLS destroy error:', e); }
+                try { hls.destroy(); } catch (e) { log('HLS destroy error: ' + e.message); }
                 hls = null;
             }
 
             if (dashPlayer) {
-                try { dashPlayer.reset(); } catch (e) { console.error('Dash reset error:', e); }
+                try { dashPlayer.reset(); } catch (e) { log('Dash reset error: ' + e.message); }
                 dashPlayer = null;
             }
 
@@ -318,7 +373,10 @@
             if (!dashPlayer) return;
             try {
                 const list = dashPlayer.getBitrateInfoListFor('video') || [];
-                if (!Array.isArray(list) || list.length === 0) return;
+                if (!Array.isArray(list) || list.length === 0) {
+                    log('No DASH quality levels found');
+                    return;
+                }
 
                 qualitySelect.innerHTML = '<option value="">📺 Select Quality</option>';
                 list.forEach((item, index) => {
@@ -327,22 +385,32 @@
                     option.textContent = `${item.height || 'Auto'}p (${Math.round(item.bitrate / 1000)} kbps)`;
                     qualitySelect.appendChild(option);
                 });
+                log(`Added ${list.length} DASH quality options`);
             } catch (error) {
-                console.error('Unable to load DASH quality options:', error);
+                log('Error loading DASH quality options: ' + error.message);
             }
         }
 
         function playDashStream() {
+            log('Attempting to play DASH stream...');
+
             if (!window.dashjs) {
                 updateStatus('❌ DASH.js not loaded', 'error');
+                log('DASH.js library not available');
                 return;
             }
 
             try {
                 stopCurrentPlayback();
+                log('Creating DASH player instance...');
                 dashPlayer = window.dashjs.MediaPlayer().create();
 
+                dashPlayer.updateSettings({
+                    debug: { logLevel: 0 }
+                });
+
                 if (currentStreamConfig && currentStreamConfig.keyId && currentStreamConfig.key) {
+                    log(`Setting ClearKey - KeyID: ${currentStreamConfig.keyId}, Key: ${currentStreamConfig.key}`);
                     dashPlayer.setProtectionData({
                         'org.w3.clearkey': {
                             clearkeys: {
@@ -350,37 +418,63 @@
                             }
                         }
                     });
+                } else {
+                    log('No ClearKey DRM config found, attempting unprotected playback');
                 }
 
+                log(`Initializing DASH player with URL: ${currentStreamConfig.streamUrl}`);
                 dashPlayer.initialize(video, currentStreamConfig.streamUrl, true);
 
-                dashPlayer.on('error', function() {
-                    updateStatus('❌ DASH Stream Error', 'error');
+                dashPlayer.on('streamInitialized', function() {
+                    log('DASH stream initialized');
                 });
 
                 dashPlayer.on('playbackInitialized', function() {
-                    updateStatus('✅ Stream Connected', 'playing');
+                    updateStatus('✅ Stream Connected (DASH)', 'playing');
                     addDashQualityOptions();
-                    video.play().catch(() => console.log('Autoplay blocked by browser'));
+                    video.play().catch((e) => log('Autoplay blocked: ' + e.message));
+                });
+
+                dashPlayer.on('error', function(event) {
+                    log(`DASH Player Error: ${event.error}`);
+                    updateStatus(`❌ DASH Error: ${event.error}`, 'error');
                 });
 
                 dashPlayer.on('bufferStalled', function() {
                     updateStatus('⏳ Buffering...', 'info');
+                    log('DASH stream buffering...');
                 });
+
             } catch (error) {
-                console.error('DASH init error:', error);
-                updateStatus('❌ Error: ' + error.message, 'error');
+                log(`DASH init exception: ${error.message}`);
+                updateStatus('❌ DASH Error: ' + error.message, 'error');
             }
         }
 
         function playHlsStream() {
+            log('Attempting to play HLS stream...');
+
             if (!window.Hls) {
-                updateStatus('❌ HLS.js not supported in this browser', 'error');
+                log('HLS.js not available, trying native playback...');
+                if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = currentStreamConfig.streamUrl;
+                    video.play().then(() => {
+                        updateStatus('✅ Stream Playing (Native HLS)', 'playing');
+                        log('Native HLS playback started');
+                    }).catch(e => {
+                        updateStatus('❌ Playback Error', 'error');
+                        log(`Native HLS error: ${e.message}`);
+                    });
+                } else {
+                    updateStatus('❌ HLS not supported in this browser', 'error');
+                    log('Browser does not support HLS');
+                }
                 return;
             }
 
             try {
                 stopCurrentPlayback();
+                log('Creating HLS.js instance...');
 
                 hls = new Hls({
                     debug: false,
@@ -392,8 +486,12 @@
                 hls.attachMedia(video);
 
                 hls.on(Hls.Events.MANIFEST_PARSED, function() {
-                    updateStatus('✅ Stream Connected', 'playing');
+                    updateStatus('✅ Stream Connected (HLS)', 'playing');
+                    log('HLS manifest parsed successfully');
+                    
                     const levels = hls.levels || [];
+                    log(`HLS stream has ${levels.length} quality levels`);
+                    
                     qualitySelect.innerHTML = '<option value="">📺 Select Quality</option>';
                     levels.forEach((level, index) => {
                         const option = document.createElement('option');
@@ -401,38 +499,49 @@
                         option.textContent = `${level.height || 'Auto'}p (${Math.round(level.bitrate / 1000)} kbps)`;
                         qualitySelect.appendChild(option);
                     });
-                    video.play().catch(() => console.log('Autoplay blocked by browser'));
+
+                    video.play().catch(() => log('Autoplay blocked by browser'));
                 });
 
                 hls.on(Hls.Events.ERROR, function(event, data) {
-                    console.error('HLS Error:', data);
+                    log(`HLS Error [${data.type}]: ${data.details}`);
                     if (data.fatal) {
-                        updateStatus('❌ Stream Error: ' + (data.type || 'Unknown'), 'error');
+                        updateStatus(`❌ Stream Error: ${data.type}`, 'error');
                     }
                 });
+
             } catch (error) {
-                console.error('HLS init error:', error);
+                log(`HLS init exception: ${error.message}`);
                 updateStatus('❌ Error: ' + error.message, 'error');
             }
         }
 
         function playStream() {
+            log('=== PLAYBACK STARTED ===');
             currentStreamConfig = parseStreamConfig(STREAM_URL);
+            detectedFormat = detectStreamFormat(currentStreamConfig.streamUrl);
 
             if (!currentStreamConfig.streamUrl) {
                 updateStatus('❌ Stream URL not configured', 'error');
+                log('Stream URL is empty');
                 return;
             }
 
             updateStatus('⏳ Loading stream...', 'info');
+            log(`Detected format: ${detectedFormat}`);
+            log(`Stream URL: ${currentStreamConfig.streamUrl}`);
+            
+            checkBrowserSupport();
+
             qualitySelect.innerHTML = '<option value="">📺 Select Quality</option>';
 
-            if (currentStreamConfig.streamUrl.toLowerCase().endsWith('.mpd') || currentStreamConfig.streamUrl.toLowerCase().includes('.mpd')) {
+            if (detectedFormat === 'dash') {
                 playDashStream();
-            } else if (currentStreamConfig.streamUrl.toLowerCase().endsWith('.m3u8')) {
+            } else if (detectedFormat === 'hls') {
                 playHlsStream();
             } else {
                 updateStatus('❌ Unsupported stream format', 'error');
+                log(`Unsupported format detected: ${detectedFormat}`);
             }
         }
 
@@ -445,6 +554,7 @@
                 hls.currentLevel = parseInt(selected, 10);
                 const level = hls.levels[selected];
                 updateStatus(`✅ Quality changed to ${level.height || 'Auto'}p`, 'playing');
+                log(`HLS quality switched to ${level.height}p`);
                 return;
             }
 
@@ -454,6 +564,7 @@
                     dashPlayer.setQualityFor('video', parseInt(selected, 10));
                     const level = list[selected];
                     updateStatus(`✅ Quality changed to ${level.height || 'Auto'}p`, 'playing');
+                    log(`DASH quality switched to ${level.height}p`);
                 }
             }
         }
@@ -469,7 +580,11 @@
         }
 
         window.addEventListener('DOMContentLoaded', function() {
-            updateStatus('Ready', '');
+            log('Page loaded, detecting stream format...');
+            const format = detectStreamFormat(parseStreamConfig(STREAM_URL).streamUrl);
+            log(`Pre-detected format: ${format}`);
+            checkBrowserSupport();
+            updateStatus('Ready - Click PLAY to start', '');
         });
     </script>
 </body>
